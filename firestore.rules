@@ -1,0 +1,71 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidDetectionEvent(data) {
+      return data.userId == request.auth.uid &&
+             data.label is string &&
+             data.label.size() > 0 &&
+             data.label.size() <= 50 &&
+             data.confidence is number &&
+             data.confidence >= 0.0 &&
+             data.confidence <= 1.0 &&
+             data.location is string &&
+             data.location.size() > 0 &&
+             data.location.size() <= 50;
+    }
+
+    function isValidDetectionSession(data) {
+      return data.userId == request.auth.uid &&
+             data.timeLabel is string &&
+             data.timeLabel.size() > 0 &&
+             data.timeLabel.size() <= 100 &&
+             data.dateHeader is string &&
+             data.dateHeader.size() > 0 &&
+             data.dateHeader.size() <= 50 &&
+             data.durationSeconds is number &&
+             data.durationSeconds >= 0 &&
+             data.detectedObjectsList is string &&
+             data.detectedObjectsList.size() <= 5000 &&
+             data.status is string &&
+             data.status.size() <= 50;
+    }
+
+    function isValidKnownPerson(data) {
+      return data.userId == request.auth.uid &&
+             data.name is string &&
+             data.name.size() > 0 &&
+             data.name.size() <= 100;
+    }
+
+    match /users/{userId}/detection_events/{eventId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidDetectionEvent(request.resource.data);
+      allow update: if isOwner(userId) && isValidDetectionEvent(request.resource.data);
+      allow delete: if isOwner(userId);
+    }
+
+    match /users/{userId}/sessions/{sessionId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidDetectionSession(request.resource.data);
+      allow update: if isOwner(userId) && isValidDetectionSession(request.resource.data);
+      allow delete: if isOwner(userId);
+    }
+
+    match /users/{userId}/known_persons/{personId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidKnownPerson(request.resource.data);
+      allow update: if isOwner(userId) && isValidKnownPerson(request.resource.data);
+      allow delete: if isOwner(userId);
+    }
+  }
+}

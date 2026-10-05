@@ -1,0 +1,8 @@
+chair
+bottle
+table
+book
+box
+lamp
+door
+window

@@ -1,0 +1,36 @@
+<resources>
+    <string name="app_name">Auralyn</string>
+    <string name="tagline">See Your Surroundings Through Sound</string>
+    <string name="welcome_description">Auralyn helps you identify objects in your environment using the camera and voice feedback. Designed for accessibility.</string>
+    <string name="get_started">Get Started</string>
+
+    <!-- Main Screen -->
+    <string name="detection_active">Detection Active</string>
+    <string name="detection_paused">Detection Paused</string>
+    <string name="start_detection">Start Detection</string>
+    <string name="stop_detection">Stop Detection</string>
+
+    <!-- Voice Screen -->
+    <string name="voice_assistance">Voice Assistance</string>
+    <string name="tap_to_speak">Tap microphone to speak</string>
+    <string name="listening">Listening…</string>
+    <string name="processing">Processing…</string>
+
+    <!-- Settings -->
+    <string name="accessibility_settings">Accessibility Settings</string>
+    <string name="speech_rate">Speech Rate</string>
+    <string name="volume">Volume</string>
+    <string name="preferred_language">Preferred Language</string>
+    <string name="detection_sensitivity">Detection Sensitivity</string>
+    <string name="high_contrast">High Contrast Mode</string>
+    <string name="large_text">Large Text Mode</string>
+    <string name="voice_announcements">Voice Announcements</string>
+
+    <!-- Preferences -->
+    <string name="detection_preferences">Detection Preferences</string>
+    <string name="important_objects">Important Objects</string>
+
+    <!-- Help -->
+    <string name="help_title">How It Works</string>
+    <string name="privacy_statement">Camera frames are processed on the device and are not stored.</string>
+</resources>

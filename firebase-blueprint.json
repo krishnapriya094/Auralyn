@@ -1,0 +1,134 @@
+{
+  "entities": {
+    "DetectionEvent": {
+      "title": "DetectionEvent",
+      "description": "An individual detected object or person event logged in real time",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "UID of the user who owns this detection"
+        },
+        "label": {
+          "type": "string",
+          "description": "Detected label such as person, chair, bottle, etc."
+        },
+        "confidence": {
+          "type": "number",
+          "description": "Confidence score between 0.0 and 1.0"
+        },
+        "location": {
+          "type": "string",
+          "description": "Directional location such as Ahead, Left, Right"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the object was detected"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation"
+        }
+      },
+      "required": ["userId", "label", "confidence", "location"]
+    },
+    "DetectionSession": {
+      "title": "DetectionSession",
+      "description": "A summarized scanning session with detected items and duration",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "UID of the user who owns this session"
+        },
+        "timeLabel": {
+          "type": "string",
+          "description": "Human readable time label"
+        },
+        "dateHeader": {
+          "type": "string",
+          "description": "Grouping header like Today, Yesterday"
+        },
+        "durationSeconds": {
+          "type": "number",
+          "description": "Duration of scanning session in seconds"
+        },
+        "durationFormatted": {
+          "type": "string",
+          "description": "Formatted duration string"
+        },
+        "detectedObjectsList": {
+          "type": "string",
+          "description": "Comma separated list of unique objects detected"
+        },
+        "objectsCount": {
+          "type": "number",
+          "description": "Count of objects detected"
+        },
+        "status": {
+          "type": "string",
+          "description": "Completion status of session"
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "Epoch timestamp in milliseconds"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation"
+        }
+      },
+      "required": ["userId", "timeLabel", "dateHeader", "durationSeconds", "detectedObjectsList", "status"]
+    },
+    "KnownPerson": {
+      "title": "KnownPerson",
+      "description": "A familiar person enrolled with facial features for custom name identification",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "UID of the user who owns this profile"
+        },
+        "name": {
+          "type": "string",
+          "description": "Name of the person"
+        },
+        "relationship": {
+          "type": "string",
+          "description": "Optional relation e.g. Friend, Family, Colleague"
+        },
+        "faceFeatures": {
+          "type": "string",
+          "description": "Serialized facial landmark feature vector"
+        },
+        "thumbnailBase64": {
+          "type": "string",
+          "description": "Small face crop thumbnail"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of enrollment"
+        }
+      },
+      "required": ["userId", "name"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/detection_events/{eventId}": {
+      "schema": "#/entities/DetectionEvent",
+      "description": "Individual detection events logged for the user"
+    },
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": "#/entities/DetectionSession",
+      "description": "Saved detection history sessions for the user"
+    },
+    "/users/{userId}/known_persons/{personId}": {
+      "schema": "#/entities/KnownPerson",
+      "description": "Familiar faces enrolled by the user"
+    }
+  }
+}

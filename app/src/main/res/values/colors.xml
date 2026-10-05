@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- High Contrast Accents -->
+    <color name="accent_yellow">#FFFF00</color>
+    <color name="accent_green">#00FF00</color>
+
+    <color name="gray_dark">#121212</color>
+    <color name="gray_light">#E0E0E0</color>
+
+    <color name="primary">#1F36A7</color>
+    <color name="onPrimary">#FFFFFF</color>
+    <color name="secondary">#3DE3F5</color>
+    <color name="onSecondary">#000000</color>
+
+    <!-- Welcome Screen Design Colors -->
+    <color name="welcome_bg">#F6F8FD</color>
+    <color name="welcome_btn_primary">#3B50BD</color>
+    <color name="welcome_btn_secondary_border">#0A828A</color>
+    <color name="welcome_text_primary">#1A1C1E</color>
+    <color name="welcome_text_secondary">#5C5E62</color>
+    <color name="welcome_text_tertiary">#8E9196</color>
+
+    <!-- Dashboard Status & Nav Colors -->
+    <color name="status_online_bg">#E6F7ED</color>
+    <color name="status_online_text">#24A148</color>
+    <color name="nav_active_bg">#C5F3F8</color>
+    <color name="nav_active_text">#0A828A</color>
+    <color name="icon_bg_camera">#ECEEFC</color>
+    <color name="icon_bg_ai">#E1F7F9</color>
+    <color name="icon_bg_voice">#FDF2E9</color>
+    <color name="cyan_fab">#3DE3F5</color>
+</resources>

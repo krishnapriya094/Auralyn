@@ -1,0 +1,6 @@
+{
+  "name": "Auralyn",
+  "description": "AI-powered visual assistance app helping visually impaired users perceive their surroundings through real-time detection, voice guidance, and accessibility features.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
