@@ -96,12 +96,24 @@ class AnnouncementManager(private val context: Context) : TextToSpeech.OnInitLis
             }
 
         if (toAnnounce.isNotEmpty()) {
-            val phrases = toAnnounce.map { formatLabelForSpeech(it.label) }
-            val message = phrases.distinct().joinToString(", ") + " detected"
+            val phrases = toAnnounce.map { detection ->
+                val cleanLabel = formatLabelForSpeech(detection.label)
+                val pos = detection.positionDescription
+                val prox = detection.proximityDescription
+                if (detection.isUrgentProximity) {
+                    "Caution, $cleanLabel very close $pos"
+                } else if (prox == "approaching") {
+                    "$cleanLabel approaching $pos"
+                } else {
+                    "$cleanLabel $pos"
+                }
+            }
+            val message = phrases.distinct().joinToString(". ")
             speak(message)
 
             if (settings.hapticFeedback) {
-                triggerHaptic()
+                val hasUrgent = toAnnounce.any { it.isUrgentProximity }
+                triggerHaptic(isUrgent = hasUrgent)
             }
 
             toAnnounce.forEach {
@@ -123,22 +135,27 @@ class AnnouncementManager(private val context: Context) : TextToSpeech.OnInitLis
         tts?.speak(message, TextToSpeech.QUEUE_FLUSH, null, "auralyn_${System.currentTimeMillis()}")
     }
 
-    private fun triggerHaptic() {
+    private fun triggerHaptic(isUrgent: Boolean = false) {
         try {
+            val duration = if (isUrgent) 120L else 50L
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-                vibratorManager?.defaultVibrator?.vibrate(
+                val effect = if (isUrgent) {
+                    VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
+                } else {
                     VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK)
-                )
+                }
+                vibratorManager?.defaultVibrator?.vibrate(effect)
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 @Suppress("DEPRECATION")
                 val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-                vibrator?.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
+                val amplitude = if (isUrgent) 255 else VibrationEffect.DEFAULT_AMPLITUDE
+                vibrator?.vibrate(VibrationEffect.createOneShot(duration, amplitude))
             } else {
                 @Suppress("DEPRECATION")
                 val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
                 @Suppress("DEPRECATION")
-                vibrator?.vibrate(50)
+                vibrator?.vibrate(duration)
             }
         } catch (e: Exception) {
             // Haptic might not be supported or allowed

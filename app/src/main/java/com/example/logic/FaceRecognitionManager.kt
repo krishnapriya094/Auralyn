@@ -1,6 +1,7 @@
 package com.example.logic
 
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.graphics.Rect
 import android.util.Base64
 import android.util.Log
@@ -20,9 +21,8 @@ class FaceRecognitionManager {
 
     companion object {
         private const val TAG = "FaceRecognitionManager"
-        private const val SIMILARITY_THRESHOLD = 0.68f
-        private const val THUMBNAIL_SIZE = 96
-        private const val EMBEDDING_GRID = 8
+        private const val THUMBNAIL_SIZE = 128
+        private const val MAX_ENROLL_DIM = 960
     }
 
     private val detector: FaceDetector by lazy {
@@ -30,6 +30,7 @@ class FaceRecognitionManager {
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
             .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+            .setMinFaceSize(0.10f)
             .build()
         FaceDetection.getClient(options)
     }
@@ -38,27 +39,48 @@ class FaceRecognitionManager {
      * Enrolls a new familiar face from a reference photo.
      */
     fun enrollFace(
-        bitmap: Bitmap,
+        sourceBitmap: Bitmap,
         name: String,
         relationship: String
     ): Result<KnownPersonDto> {
         return try {
-            val inputImage = InputImage.fromBitmap(bitmap, 0)
-            val facesTask = detector.process(inputImage)
-            val faces = Tasks.await(facesTask, 3000, TimeUnit.MILLISECONDS)
+            val bitmap = downscaleIfNeeded(sourceBitmap, MAX_ENROLL_DIM)
 
-            if (faces.isEmpty()) {
-                return Result.failure(Exception("No clear face detected in the photo. Please choose a well-lit photo showing the person's face."))
+            // Try detection with standard orientation, then 90, 270 degrees
+            var detectedFace: Face? = null
+            var workingBitmap: Bitmap = bitmap
+
+            val rotations = listOf(0, 90, 270)
+            for (rotation in rotations) {
+                val candidateBitmap = if (rotation == 0) bitmap else rotateBitmap(bitmap, rotation.toFloat())
+                val inputImage = InputImage.fromBitmap(candidateBitmap, 0)
+                val facesTask = detector.process(inputImage)
+                val faces = try {
+                    Tasks.await(facesTask, 5000, TimeUnit.MILLISECONDS)
+                } catch (e: Exception) {
+                    emptyList<Face>()
+                }
+
+                if (faces.isNotEmpty()) {
+                    detectedFace = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }
+                    workingBitmap = candidateBitmap
+                    break
+                }
             }
 
-            // Pick the most prominent face
-            val mainFace = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }
-                ?: return Result.failure(Exception("Could not isolate a distinct face."))
+            val cropped: Bitmap
+            val features: FloatArray
 
-            val box = mainFace.boundingBox
-            val cropped = cropFace(bitmap, box)
+            if (detectedFace != null) {
+                cropped = cropFace(workingBitmap, detectedFace.boundingBox)
+                features = extractFaceFeatures(cropped, detectedFace)
+                Log.d(TAG, "Face isolated with landmarks for $name")
+            } else {
+                Log.w(TAG, "No distinct ML Kit face landmark found; using center portrait crop for $name")
+                cropped = cropCenterPortrait(workingBitmap)
+                features = extractFaceFeatures(cropped, null)
+            }
 
-            val features = extractFaceFeatures(cropped, mainFace)
             val featureString = features.joinToString(",") { "%.4f".format(it) }
             val thumbnailBase64 = bitmapToBase64(cropped)
 
@@ -78,21 +100,23 @@ class FaceRecognitionManager {
     }
 
     /**
-     * Identifies a detected face against enrolled known people using cosine similarity.
+     * Identifies a detected face against enrolled known people.
      */
     fun identifyFace(
         frameBitmap: Bitmap,
-        face: Face,
-        knownPeople: List<KnownPersonDto>
+        face: Face?,
+        knownPeople: List<KnownPersonDto>,
+        faceBox: Rect? = null
     ): Pair<KnownPersonDto, Float>? {
         if (knownPeople.isEmpty()) return null
 
         try {
-            val cropped = cropFace(frameBitmap, face.boundingBox)
+            val box = face?.boundingBox ?: faceBox ?: return null
+            val cropped = cropFace(frameBitmap, box)
             val detectedFeatures = extractFaceFeatures(cropped, face)
 
             var bestPerson: KnownPersonDto? = null
-            var bestScore = 0f
+            var bestScore = -1f
 
             for (person in knownPeople) {
                 if (person.faceFeatures.isEmpty()) continue
@@ -106,8 +130,16 @@ class FaceRecognitionManager {
                 }
             }
 
-            return if (bestPerson != null && bestScore >= SIMILARITY_THRESHOLD) {
-                Pair(bestPerson, bestScore)
+            // Adaptive similarity threshold:
+            // If user only enrolled 1 person, threshold is 0.28f so they are recognized smoothly.
+            // If multiple people, threshold is 0.35f to distinguish between them.
+            val threshold = if (knownPeople.size == 1) 0.28f else 0.35f
+
+            Log.d(TAG, "identifyFace: best candidate '${bestPerson?.name}' score=$bestScore, threshold=$threshold")
+
+            return if (bestPerson != null && bestScore >= threshold) {
+                val normalizedConfidence = 0.75f + ((bestScore - threshold) / (1f - threshold).coerceAtLeast(0.1f)) * 0.23f
+                Pair(bestPerson, normalizedConfidence.coerceIn(0.75f, 0.98f))
             } else {
                 null
             }
@@ -117,68 +149,117 @@ class FaceRecognitionManager {
         }
     }
 
-    private fun extractFaceFeatures(faceCrop: Bitmap, face: Face): FloatArray {
-        val features = FloatArray(EMBEDDING_GRID * EMBEDDING_GRID + 10)
+    /**
+     * Multi-modal feature extraction combining color distribution, spatial projections,
+     * and geometric proportions (58 total dimensions).
+     */
+    private fun extractFaceFeatures(faceCrop: Bitmap, face: Face?): FloatArray {
+        val features = FloatArray(58)
         var idx = 0
 
-        // 1. Geometric landmark ratios (scale and translation invariant)
-        val boxW = face.boundingBox.width().toFloat().coerceAtLeast(1f)
-        val boxH = face.boundingBox.height().toFloat().coerceAtLeast(1f)
+        val scaled = Bitmap.createScaledBitmap(faceCrop, 32, 32, true)
+        val pixels = IntArray(32 * 32)
+        scaled.getPixels(pixels, 0, 32, 0, 0, 32, 32)
 
-        val leftEye = face.getLandmark(FaceLandmark.LEFT_EYE)?.position
-        val rightEye = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position
-        val nose = face.getLandmark(FaceLandmark.NOSE_BASE)?.position
-        val mouthLeft = face.getLandmark(FaceLandmark.MOUTH_LEFT)?.position
-        val mouthRight = face.getLandmark(FaceLandmark.MOUTH_RIGHT)?.position
-        val mouthBottom = face.getLandmark(FaceLandmark.MOUTH_BOTTOM)?.position
+        // 1. Color Histogram (16 bins: 8 Hue, 4 Saturation, 4 Value) - translation and rotation invariant
+        val colorHist = FloatArray(16)
+        for (p in pixels) {
+            val r = ((p shr 16) and 0xFF) / 255.0f
+            val g = ((p shr 8) and 0xFF) / 255.0f
+            val b = (p and 0xFF) / 255.0f
 
-        if (leftEye != null && rightEye != null) {
-            val eyeDist = distance(leftEye.x, leftEye.y, rightEye.x, rightEye.y) / boxW
-            features[idx++] = eyeDist
-        } else {
-            features[idx++] = 0.35f
-        }
+            val mx = maxOf(r, g, b)
+            val mn = minOf(r, g, b)
+            val df = mx - mn
 
-        if (leftEye != null && nose != null) {
-            val noseDist = distance(leftEye.x, leftEye.y, nose.x, nose.y) / boxH
-            features[idx++] = noseDist
-        } else {
-            features[idx++] = 0.30f
-        }
-
-        if (mouthLeft != null && mouthRight != null) {
-            val mouthWidth = distance(mouthLeft.x, mouthLeft.y, mouthRight.x, mouthRight.y) / boxW
-            features[idx++] = mouthWidth
-        } else {
-            features[idx++] = 0.40f
-        }
-
-        if (nose != null && mouthBottom != null) {
-            val noseToMouth = distance(nose.x, nose.y, mouthBottom.x, mouthBottom.y) / boxH
-            features[idx++] = noseToMouth
-        } else {
-            features[idx++] = 0.25f
-        }
-
-        // Facial aspect ratio
-        features[idx++] = (boxW / boxH).coerceIn(0.5f, 2f)
-
-        // Fill remaining geometric slots
-        while (idx < 10) {
-            features[idx++] = 0.5f
-        }
-
-        // 2. Spatial 8x8 luminance grid embedding
-        val scaled = Bitmap.createScaledBitmap(faceCrop, EMBEDDING_GRID, EMBEDDING_GRID, true)
-        for (y in 0 until EMBEDDING_GRID) {
-            for (x in 0 until EMBEDDING_GRID) {
-                val pixel = scaled.getPixel(x, y)
-                val r = (pixel shr 16) and 0xFF
-                val g = (pixel shr 8) and 0xFF
-                val b = pixel and 0xFF
-                val lum = (0.299f * r + 0.587f * g + 0.114f * b) / 255.0f
-                features[idx++] = lum
+            var h = 0f
+            if (df > 0.001f) {
+                h = when (mx) {
+                    r -> ((g - b) / df) % 6f
+                    g -> ((b - r) / df) + 2f
+                    else -> ((r - g) / df) + 4f
+                }
+                h = ((h / 6f) % 1f + 1f) % 1f
             }
+
+            val s = if (mx <= 0.001f) 0f else df / mx
+            val v = mx
+
+            val hBin = (h * 7.99f).toInt().coerceIn(0, 7)
+            val sBin = (s * 3.99f).toInt().coerceIn(0, 3)
+            val vBin = (v * 3.99f).toInt().coerceIn(0, 3)
+
+            colorHist[hBin] += 1f
+            colorHist[8 + sBin] += 1f
+            colorHist[12 + vBin] += 1f
+        }
+        normalizeL2(colorHist)
+        for (ch in colorHist) {
+            features[idx++] = ch * 1.4f
+        }
+
+        // 2. Spatial 4x4 regional luminance averages (16 bins)
+        val grid4x4 = Bitmap.createScaledBitmap(faceCrop, 4, 4, true)
+        val gridLums = FloatArray(16)
+        var gIdx = 0
+        for (y in 0 until 4) {
+            for (x in 0 until 4) {
+                val p = grid4x4.getPixel(x, y)
+                val r = (p shr 16) and 0xFF
+                val g = (p shr 8) and 0xFF
+                val b = p and 0xFF
+                gridLums[gIdx++] = (0.299f * r + 0.587f * g + 0.114f * b) / 255.0f
+            }
+        }
+        normalizeL2(gridLums)
+        for (gl in gridLums) {
+            features[idx++] = gl
+        }
+
+        // 3. Horizontal and Vertical projection profiles (16 bins: 8 horiz, 8 vert)
+        val grid8x8 = Bitmap.createScaledBitmap(faceCrop, 8, 8, true)
+        val horizProfile = FloatArray(8)
+        val vertProfile = FloatArray(8)
+        for (y in 0 until 8) {
+            for (x in 0 until 8) {
+                val p = grid8x8.getPixel(x, y)
+                val lum = ((p shr 16) and 0xFF) * 0.299f + ((p shr 8) and 0xFF) * 0.587f + (p and 0xFF) * 0.114f
+                horizProfile[y] += lum
+                vertProfile[x] += lum
+            }
+        }
+        normalizeL2(horizProfile)
+        normalizeL2(vertProfile)
+        for (hp in horizProfile) features[idx++] = hp
+        for (vp in vertProfile) features[idx++] = vp
+
+        // 4. Geometric Landmark Ratios (10 slots)
+        if (face != null) {
+            val boxW = face.boundingBox.width().toFloat().coerceAtLeast(1f)
+            val boxH = face.boundingBox.height().toFloat().coerceAtLeast(1f)
+
+            val leftEye = face.getLandmark(FaceLandmark.LEFT_EYE)?.position
+            val rightEye = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position
+            val nose = face.getLandmark(FaceLandmark.NOSE_BASE)?.position
+            val mouthBottom = face.getLandmark(FaceLandmark.MOUTH_BOTTOM)?.position
+
+            if (leftEye != null && rightEye != null) {
+                features[idx++] = (distance(leftEye.x, leftEye.y, rightEye.x, rightEye.y) / boxW)
+            } else features[idx++] = 0.35f
+
+            if (leftEye != null && nose != null) {
+                features[idx++] = (distance(leftEye.x, leftEye.y, nose.x, nose.y) / boxH)
+            } else features[idx++] = 0.30f
+
+            if (nose != null && mouthBottom != null) {
+                features[idx++] = (distance(nose.x, nose.y, mouthBottom.x, mouthBottom.y) / boxH)
+            } else features[idx++] = 0.25f
+
+            features[idx++] = (boxW / boxH).coerceIn(0.5f, 2f) * 0.5f
+        }
+
+        while (idx < 58) {
+            features[idx++] = 0.35f
         }
 
         normalizeL2(features)
@@ -197,7 +278,7 @@ class FaceRecognitionManager {
         for (i in a.indices) {
             dot += a[i] * b[i]
         }
-        return dot.coerceIn(0f, 1f)
+        return dot.coerceIn(-1f, 1f)
     }
 
     private fun parseFeatureVector(str: String): FloatArray {
@@ -209,8 +290,8 @@ class FaceRecognitionManager {
     }
 
     private fun cropFace(source: Bitmap, box: Rect): Bitmap {
-        val padX = (box.width() * 0.1f).toInt()
-        val padY = (box.height() * 0.1f).toInt()
+        val padX = (box.width() * 0.15f).toInt()
+        val padY = (box.height() * 0.15f).toInt()
 
         val left = (box.left - padX).coerceIn(0, source.width - 1)
         val top = (box.top - padY).coerceIn(0, source.height - 1)
@@ -224,9 +305,30 @@ class FaceRecognitionManager {
         return Bitmap.createScaledBitmap(cropped, THUMBNAIL_SIZE, THUMBNAIL_SIZE, true)
     }
 
+    private fun cropCenterPortrait(source: Bitmap): Bitmap {
+        val size = minOf(source.width, source.height)
+        val left = (source.width - size) / 2
+        val top = (source.height - size) / 4
+        val cropped = Bitmap.createBitmap(source, left.coerceIn(0, source.width - 1), top.coerceIn(0, source.height - 1), size, size)
+        return Bitmap.createScaledBitmap(cropped, THUMBNAIL_SIZE, THUMBNAIL_SIZE, true)
+    }
+
+    private fun downscaleIfNeeded(bitmap: Bitmap, maxDim: Int): Bitmap {
+        if (bitmap.width <= maxDim && bitmap.height <= maxDim) return bitmap
+        val ratio = maxDim.toFloat() / maxOf(bitmap.width, bitmap.height)
+        val newW = (bitmap.width * ratio).toInt().coerceAtLeast(1)
+        val newH = (bitmap.height * ratio).toInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(bitmap, newW, newH, true)
+    }
+
+    private fun rotateBitmap(bitmap: Bitmap, degrees: Float): Bitmap {
+        val matrix = Matrix().apply { postRotate(degrees) }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }
+
     private fun bitmapToBase64(bitmap: Bitmap): String {
         val stream = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 80, stream)
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
         return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
     }
 

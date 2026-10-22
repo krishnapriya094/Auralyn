@@ -470,12 +470,11 @@ private fun EnrollFaceDialog(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
         if (uri != null) {
-            try {
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    selectedBitmap = BitmapFactory.decodeStream(stream)
-                    errorMessage = null
-                }
-            } catch (e: Exception) {
+            val bmp = loadAndOrientBitmap(context, uri)
+            if (bmp != null) {
+                selectedBitmap = bmp
+                errorMessage = null
+            } else {
                 errorMessage = "Failed to load selected image"
             }
         }
@@ -651,4 +650,52 @@ private fun EnrollFaceDialog(
             }
         }
     )
+}
+
+private fun loadAndOrientBitmap(context: android.content.Context, uri: Uri): Bitmap? {
+    return try {
+        // 1. Determine image dimensions without allocating full memory
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, options)
+        }
+        val maxDim = maxOf(options.outWidth, options.outHeight)
+        var sampleSize = 1
+        while (maxDim / sampleSize > 1024) {
+            sampleSize *= 2
+        }
+
+        // 2. Decode scaled bitmap
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val decoded = context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, decodeOptions)
+        } ?: return null
+
+        // 3. Inspect EXIF orientation tag and rotate if necessary
+        val rotation = try {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                val exif = android.media.ExifInterface(stream)
+                when (exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, android.media.ExifInterface.ORIENTATION_NORMAL)) {
+                    android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            } ?: 0f
+        } catch (e: Exception) {
+            0f
+        }
+
+        if (rotation != 0f) {
+            val matrix = android.graphics.Matrix().apply { postRotate(rotation) }
+            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+        } else {
+            decoded
+        }
+    } catch (e: Exception) {
+        null
+    }
 }

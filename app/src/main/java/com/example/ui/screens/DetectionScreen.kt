@@ -27,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Movie
@@ -99,6 +100,7 @@ fun DetectionScreen(
     val isModelReady by viewModel.detectionManager.isModelReady.collectAsState()
     val modelErrorMessage by viewModel.detectionManager.modelErrorMessage.collectAsState()
     val knownPeople by viewModel.knownPeople.collectAsState()
+    val isTorchEnabled by viewModel.isTorchEnabled.collectAsState()
 
     val scrollState = rememberScrollState()
 
@@ -507,6 +509,7 @@ fun DetectionScreen(
                         onFrameProcessed = { bitmap ->
                             viewModel.processFrame(bitmap)
                         },
+                        isTorchEnabled = isTorchEnabled,
                         modifier = Modifier.fillMaxSize()
                     )
 
@@ -527,7 +530,27 @@ fun DetectionScreen(
                         )
                     }
 
-                    // Bottom Left Detected Object HUD
+                    // Top Right Action: Torch Toggle Button (improves camera frames in dark rooms)
+                    Box(
+                        modifier = Modifier
+                            .padding(12.dp)
+                            .align(Alignment.TopEnd)
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(if (isTorchEnabled) Color(0xFFF59E0B) else Color(0x99000000))
+                            .clickable { viewModel.toggleTorch() }
+                            .testTag("btn_toggle_torch"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = if (isTorchEnabled) "Flashlight On (Tap to turn off)" else "Flashlight Off (Tap to turn on)",
+                            tint = if (isTorchEnabled) Color.Black else Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    // Bottom Left Detected Object HUD with Proximity
                     Box(
                         modifier = Modifier
                             .padding(12.dp)
@@ -543,7 +566,9 @@ fun DetectionScreen(
                                 val top = detections.maxByOrNull { it.confidence }
                                 if (top != null) {
                                     val pct = (top.confidence * 100).toInt()
-                                    "${top.label} ($pct%) • ${top.positionDescription}"
+                                    val isKnown = knownPeople.any { it.name.equals(top.label, ignoreCase = true) }
+                                    val prefix = if (isKnown) "👤 " else ""
+                                    "$prefix${top.label} ($pct%) • ${top.positionDescription} • ${top.proximityDescription}"
                                 } else {
                                     "Object detected"
                                 }

@@ -2,6 +2,7 @@ package com.example.logic
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.graphics.RectF
 import android.util.Log
 import com.example.data.model.KnownPersonDto
@@ -12,6 +13,7 @@ import com.google.mlkit.vision.face.FaceDetector
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.pose.PoseDetection
 import com.google.mlkit.vision.pose.PoseDetector
+import com.google.mlkit.vision.pose.PoseLandmark
 import com.google.mlkit.vision.pose.defaults.PoseDetectorOptions
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -73,8 +75,10 @@ class DetectionManager(private val context: Context) {
 
     private val faceDetector: FaceDetector by lazy {
         val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+            .setMinFaceSize(0.08f)
             .build()
         FaceDetection.getClient(options)
     }
@@ -221,10 +225,11 @@ class DetectionManager(private val context: Context) {
                 Log.e(TAG, "Person detection error: ${e.message}", e)
             }
 
-            // 3. Merge candidates with non-maximum suppression
+            // 3. Merge candidates with non-maximum suppression and temporal smoothing
             val finalDetections = nonMaxSuppression(allCandidates)
+            val smoothedDetections = smoothAndTrackDetections(finalDetections)
             _highestConfidence.value = highestScore
-            _results.emit(finalDetections)
+            _results.emit(smoothedDetections)
         } finally {
             inferenceMutex.unlock()
         }
@@ -237,7 +242,7 @@ class DetectionManager(private val context: Context) {
 
             // 1. Pose detection for full/partial human body
             val poseTask = poseDetector.process(inputImage)
-            val pose = Tasks.await(poseTask, 400, TimeUnit.MILLISECONDS)
+            val pose = Tasks.await(poseTask, 2000, TimeUnit.MILLISECONDS)
             val validLandmarks = pose.allPoseLandmarks.filter { it.inFrameLikelihood > 0.40f }
 
             if (validLandmarks.size >= 3) {
@@ -269,7 +274,7 @@ class DetectionManager(private val context: Context) {
 
             // 2. Face detection & Familiar Person Identification
             val faceTask = faceDetector.process(inputImage)
-            val faces = Tasks.await(faceTask, 400, TimeUnit.MILLISECONDS)
+            val faces = Tasks.await(faceTask, 2000, TimeUnit.MILLISECONDS)
             for (face in faces) {
                 val box = face.boundingBox
                 val w = bitmap.width.toFloat()
@@ -293,15 +298,21 @@ class DetectionManager(private val context: Context) {
                 val detectedLabel = match?.first?.name ?: "person"
                 val detectedConfidence = match?.second ?: 0.90f
 
-                val overlappingIdx = personResults.indexOfFirst { existing ->
-                    existing.boundingBox?.let { iou(it, faceRect) > 0.3f } ?: false
+                // Link face to existing body detection if face is within body boundaries
+                val faceCenterX = faceRect.centerX()
+                val faceCenterY = faceRect.centerY()
+                val matchingBodyIdx = personResults.indexOfFirst { body ->
+                    body.boundingBox?.let { b ->
+                        (faceCenterX in (b.left..b.right) && faceCenterY in (b.top..b.bottom)) ||
+                        (iou(b, faceRect) > 0.15f)
+                    } ?: false
                 }
 
-                if (overlappingIdx != -1) {
-                    // Upgrade existing body detection with specific person's name
-                    val existing = personResults[overlappingIdx]
+                if (matchingBodyIdx != -1) {
+                    val existing = personResults[matchingBodyIdx]
                     if (detectedLabel != "person") {
-                        personResults[overlappingIdx] = existing.copy(
+                        // Upgrade the body detection directly to the enrolled person's name!
+                        personResults[matchingBodyIdx] = existing.copy(
                             label = detectedLabel,
                             confidence = maxOf(existing.confidence, detectedConfidence)
                         )
@@ -314,6 +325,54 @@ class DetectionManager(private val context: Context) {
                             boundingBox = faceRect
                         )
                     )
+                }
+            }
+
+            // 3. Fallback: If face detector returned no face, but pose detected facial landmarks (nose, eyes)
+            if (faces.isEmpty() && validLandmarks.isNotEmpty() && enrolledPeople.isNotEmpty()) {
+                val noseLandmark = pose.getPoseLandmark(PoseLandmark.NOSE)
+                val leftEyeLandmark = pose.getPoseLandmark(PoseLandmark.LEFT_EYE)
+                val rightEyeLandmark = pose.getPoseLandmark(PoseLandmark.RIGHT_EYE)
+
+                val anchor = noseLandmark ?: leftEyeLandmark
+                if (anchor != null) {
+                    val anchorX = anchor.position.x
+                    val anchorY = anchor.position.y
+
+                    val eyeDist = if (leftEyeLandmark != null && rightEyeLandmark != null) {
+                        kotlin.math.abs(leftEyeLandmark.position.x - rightEyeLandmark.position.x).coerceAtLeast(40f)
+                    } else 80f
+
+                    val boxHalfW = eyeDist * 1.6f
+                    val boxHalfH = eyeDist * 2.2f
+
+                    val fLeft = (anchorX - boxHalfW).toInt().coerceIn(0, bitmap.width - 1)
+                    val fTop = (anchorY - boxHalfH * 0.7f).toInt().coerceIn(0, bitmap.height - 1)
+                    val fRight = (anchorX + boxHalfW).toInt().coerceIn(fLeft + 1, bitmap.width)
+                    val fBottom = (anchorY + boxHalfH * 1.3f).toInt().coerceIn(fTop + 1, bitmap.height)
+                    val synthesizedBox = Rect(fLeft, fTop, fRight, fBottom)
+
+                    val match = faceRecognitionManager.identifyFace(bitmap, null, enrolledPeople, synthesizedBox)
+                    if (match != null) {
+                        val detectedLabel = match.first.name
+                        val detectedConfidence = match.second
+                        if (personResults.isNotEmpty()) {
+                            personResults[0] = personResults[0].copy(
+                                label = detectedLabel,
+                                confidence = maxOf(personResults[0].confidence, detectedConfidence)
+                            )
+                        } else {
+                            val w = bitmap.width.toFloat()
+                            val h = bitmap.height.toFloat()
+                            personResults.add(
+                                DetectionResult(
+                                    label = detectedLabel,
+                                    confidence = detectedConfidence,
+                                    boundingBox = RectF(fLeft / w, fTop / h, fRight / w, fBottom / h)
+                                )
+                            )
+                        }
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -395,10 +454,16 @@ class DetectionManager(private val context: Context) {
 
             if (maxScore < minConfidence) continue
 
-            val cx = (if (isTransposedOutput) output[anchor][0] else output[0][anchor]) / normWidth
-            val cy = (if (isTransposedOutput) output[anchor][1] else output[1][anchor]) / normHeight
-            val w = (if (isTransposedOutput) output[anchor][2] else output[2][anchor]) / normWidth
-            val h = (if (isTransposedOutput) output[anchor][3] else output[3][anchor]) / normHeight
+            val rawCx = if (isTransposedOutput) output[anchor][0] else output[0][anchor]
+            val rawCy = if (isTransposedOutput) output[anchor][1] else output[1][anchor]
+            val rawW = if (isTransposedOutput) output[anchor][2] else output[2][anchor]
+            val rawH = if (isTransposedOutput) output[anchor][3] else output[3][anchor]
+
+            // Support both pixel coordinates ([0..640]) and pre-normalized coordinates ([0..1])
+            val cx = if (rawCx > 1.0f) rawCx / normWidth else rawCx
+            val cy = if (rawCy > 1.0f) rawCy / normHeight else rawCy
+            val w = if (rawW > 1.0f) rawW / normWidth else rawW
+            val h = if (rawH > 1.0f) rawH / normHeight else rawH
 
             val left = (cx - w / 2f).coerceIn(0f, 1f)
             val top = (cy - h / 2f).coerceIn(0f, 1f)
@@ -449,6 +514,80 @@ class DetectionManager(private val context: Context) {
         val aArea = a.width() * a.height()
         val bArea = b.width() * b.height()
         return interArea / (aArea + bArea - interArea)
+    }
+
+    private data class TrackedItem(
+        var result: DetectionResult,
+        var missingFrames: Int = 0
+    )
+
+    private val trackedDetections = mutableListOf<TrackedItem>()
+
+    /**
+     * Exponential Moving Average (EMA) box coordinate smoothing & 1-frame holdover
+     * to eliminate visual jumping and speech stutter across video frames.
+     */
+    private fun smoothAndTrackDetections(candidates: List<DetectionResult>): List<DetectionResult> {
+        val smoothed = mutableListOf<DetectionResult>()
+        val unmatchedCandidates = candidates.toMutableList()
+
+        val iterator = trackedDetections.iterator()
+        while (iterator.hasNext()) {
+            val tracked = iterator.next()
+            val oldBox = tracked.result.boundingBox
+
+            val bestCandidate = unmatchedCandidates
+                .filter { it.label.equals(tracked.result.label, ignoreCase = true) }
+                .minByOrNull { c ->
+                    if (oldBox != null && c.boundingBox != null) {
+                        val dx = oldBox.centerX() - c.boundingBox.centerX()
+                        val dy = oldBox.centerY() - c.boundingBox.centerY()
+                        dx * dx + dy * dy
+                    } else 1f
+                }
+
+            if (bestCandidate != null && oldBox != null && bestCandidate.boundingBox != null) {
+                val newBox = bestCandidate.boundingBox
+                val centerDistSq = (oldBox.centerX() - newBox.centerX()) * (oldBox.centerX() - newBox.centerX()) +
+                        (oldBox.centerY() - newBox.centerY()) * (oldBox.centerY() - newBox.centerY())
+
+                if (centerDistSq < 0.09f) {
+                    val alpha = 0.70f
+                    val smoothLeft = alpha * newBox.left + (1f - alpha) * oldBox.left
+                    val smoothTop = alpha * newBox.top + (1f - alpha) * oldBox.top
+                    val smoothRight = alpha * newBox.right + (1f - alpha) * oldBox.right
+                    val smoothBottom = alpha * newBox.bottom + (1f - alpha) * oldBox.bottom
+
+                    val smoothConf = alpha * bestCandidate.confidence + (1f - alpha) * tracked.result.confidence
+                    val updated = bestCandidate.copy(
+                        confidence = smoothConf,
+                        boundingBox = RectF(smoothLeft, smoothTop, smoothRight, smoothBottom)
+                    )
+
+                    tracked.result = updated
+                    tracked.missingFrames = 0
+                    smoothed.add(updated)
+                    unmatchedCandidates.remove(bestCandidate)
+                    continue
+                }
+            }
+
+            tracked.missingFrames++
+            if (tracked.missingFrames <= 1) {
+                // Hold for 1 frame to prevent flicker
+                val held = tracked.result.copy(confidence = tracked.result.confidence * 0.85f)
+                smoothed.add(held)
+            } else {
+                iterator.remove()
+            }
+        }
+
+        for (newCandidate in unmatchedCandidates) {
+            trackedDetections.add(TrackedItem(newCandidate, missingFrames = 0))
+            smoothed.add(newCandidate)
+        }
+
+        return smoothed.sortedByDescending { it.confidence }.take(MAX_DETECTIONS)
     }
 
     fun emitSimulatedDetections(detections: List<DetectionResult>) {

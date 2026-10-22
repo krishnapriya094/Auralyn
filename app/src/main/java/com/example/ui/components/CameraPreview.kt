@@ -49,6 +49,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -73,6 +74,9 @@ fun VideoDetectionPreview(
     detections: List<DetectionResult>,
     onTogglePlayPause: () -> Unit,
     onFrameProcessed: (Bitmap) -> Unit,
+    isTorchEnabled: Boolean = false,
+    useFrontCamera: Boolean = false,
+    testPhotoBitmap: Bitmap? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -81,6 +85,15 @@ fun VideoDetectionPreview(
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
     var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
     var mediaPlayerRef by remember { mutableStateOf<MediaPlayer?>(null) }
+    var cameraControlRef by remember { mutableStateOf<androidx.camera.core.CameraControl?>(null) }
+
+    LaunchedEffect(isTorchEnabled, cameraControlRef) {
+        try {
+            cameraControlRef?.enableTorch(isTorchEnabled)
+        } catch (e: Exception) {
+            // Torch may not be available on all camera hardware
+        }
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -89,8 +102,8 @@ fun VideoDetectionPreview(
     }
 
     // Continuous Frame Extraction Loop for Video Capture Playback
-    LaunchedEffect(isDetectionActive, isVideoPlaying, feedMode, textureViewRef, mediaPlayerRef) {
-        if (feedMode == VisionFeedMode.VIDEO_CAPTURE) {
+    LaunchedEffect(isDetectionActive, isVideoPlaying, feedMode, textureViewRef, mediaPlayerRef, testPhotoBitmap) {
+        if (feedMode == VisionFeedMode.VIDEO_CAPTURE && testPhotoBitmap == null) {
             while (isActive) {
                 if (isDetectionActive && isVideoPlaying && textureViewRef != null) {
                     try {
@@ -108,7 +121,15 @@ fun VideoDetectionPreview(
     }
 
     Box(modifier = modifier.background(Color(0xFF0F172A))) {
-        if (feedMode == VisionFeedMode.VIDEO_CAPTURE) {
+        if (testPhotoBitmap != null) {
+            // Test Photo Mode: render loaded photo directly
+            androidx.compose.foundation.Image(
+                bitmap = testPhotoBitmap.asImageBitmap(),
+                contentDescription = "Test Photo Analysis",
+                contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else if (feedMode == VisionFeedMode.VIDEO_CAPTURE) {
             // Native Video Surface View with MediaPlayer
             val effectiveUri = remember(videoUri) {
                 getEffectiveVideoUri(context, videoUri)
@@ -194,53 +215,61 @@ fun VideoDetectionPreview(
                 )
             }
         } else {
-            // Live Camera Stream
-            AndroidView(
-                factory = { ctx ->
-                    val previewView = PreviewView(ctx).apply {
-                        scaleType = PreviewView.ScaleType.FILL_CENTER
-                        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                    }
+            // Live Camera Stream with Front/Back support
+            androidx.compose.runtime.key(useFrontCamera) {
+                AndroidView(
+                    factory = { ctx ->
+                        val previewView = PreviewView(ctx).apply {
+                            scaleType = PreviewView.ScaleType.FILL_CENTER
+                            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                        }
 
-                    val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                    cameraProviderFuture.addListener({
-                        try {
-                            val cameraProvider = cameraProviderFuture.get()
-                            val preview = Preview.Builder().build().also {
-                                it.setSurfaceProvider(previewView.surfaceProvider)
-                            }
-
-                            val imageAnalysis = ImageAnalysis.Builder()
-                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                                .build()
-                                .also {
-                                    it.setAnalyzer(cameraExecutor) { imageProxy ->
-                                        if (isDetectionActive) {
-                                            val bitmap = imageProxyToBitmap(imageProxy)
-                                            if (bitmap != null) {
-                                                onFrameProcessed(bitmap)
-                                            }
-                                        }
-                                        imageProxy.close()
-                                    }
+                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                        cameraProviderFuture.addListener({
+                            try {
+                                val cameraProvider = cameraProviderFuture.get()
+                                val preview = Preview.Builder().build().also {
+                                    it.setSurfaceProvider(previewView.surfaceProvider)
                                 }
 
-                            cameraProvider.unbindAll()
-                            cameraProvider.bindToLifecycle(
-                                lifecycleOwner,
-                                CameraSelector.DEFAULT_BACK_CAMERA,
-                                preview,
-                                imageAnalysis
-                            )
-                        } catch (e: Exception) {
-                            // Camera preview fallback
-                        }
-                    }, ContextCompat.getMainExecutor(ctx))
+                                val imageAnalysis = ImageAnalysis.Builder()
+                                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                    .build()
+                                    .also {
+                                        it.setAnalyzer(cameraExecutor) { imageProxy ->
+                                            if (isDetectionActive) {
+                                                val bitmap = imageProxyToBitmap(imageProxy)
+                                                if (bitmap != null) {
+                                                    onFrameProcessed(bitmap)
+                                                }
+                                            }
+                                            imageProxy.close()
+                                        }
+                                    }
 
-                    previewView
-                },
-                modifier = Modifier.fillMaxSize()
-            )
+                                cameraProvider.unbindAll()
+                                val selector = if (useFrontCamera && cameraProvider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) {
+                                    CameraSelector.DEFAULT_FRONT_CAMERA
+                                } else {
+                                    CameraSelector.DEFAULT_BACK_CAMERA
+                                }
+                                val camera = cameraProvider.bindToLifecycle(
+                                    lifecycleOwner,
+                                    selector,
+                                    preview,
+                                    imageAnalysis
+                                )
+                                cameraControlRef = camera.cameraControl
+                            } catch (e: Exception) {
+                                // Camera preview fallback
+                            }
+                        }, ContextCompat.getMainExecutor(ctx))
+
+                        previewView
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         }
 
         // Bounding Boxes & Scanning Overlay
@@ -260,6 +289,9 @@ fun CameraPreview(
     detections: List<DetectionResult>,
     onTogglePlayPause: () -> Unit = {},
     onFrameProcessed: (Bitmap) -> Unit,
+    isTorchEnabled: Boolean = false,
+    useFrontCamera: Boolean = false,
+    testPhotoBitmap: Bitmap? = null,
     modifier: Modifier = Modifier
 ) {
     VideoDetectionPreview(
@@ -270,6 +302,9 @@ fun CameraPreview(
         detections = detections,
         onTogglePlayPause = onTogglePlayPause,
         onFrameProcessed = onFrameProcessed,
+        isTorchEnabled = isTorchEnabled,
+        useFrontCamera = useFrontCamera,
+        testPhotoBitmap = testPhotoBitmap,
         modifier = modifier
     )
 }
@@ -318,12 +353,55 @@ private fun DetectionOverlayCanvas(detections: List<DetectionResult>) {
                     else -> AuralynCyan
                 }
 
+                // Draw Bounding Rectangle
                 drawRoundRect(
                     color = boxColor,
                     topLeft = Offset(left, top),
                     size = Size(right - left, bottom - top),
                     cornerRadius = androidx.compose.ui.geometry.CornerRadius(8f, 8f),
                     style = Stroke(width = 4f)
+                )
+
+                // Draw Name, Confidence, & Proximity Tag on top of bounding box
+                val proxTag = when (detection.proximityDescription) {
+                    "very close" -> " • CLOSE"
+                    "approaching" -> " • ~2m"
+                    else -> ""
+                }
+                val labelText = if (!isStandardObj) {
+                    "★ ${detection.label.replaceFirstChar { it.uppercase() }} (${(detection.confidence * 100).toInt()}%)$proxTag"
+                } else {
+                    "${detection.label.replaceFirstChar { it.uppercase() }} (${(detection.confidence * 100).toInt()}%)$proxTag"
+                }
+
+                val textPaint = android.graphics.Paint().apply {
+                    color = android.graphics.Color.WHITE
+                    textSize = 34f
+                    isFakeBoldText = true
+                    isAntiAlias = true
+                }
+                val textBounds = android.graphics.Rect()
+                textPaint.getTextBounds(labelText, 0, labelText.length, textBounds)
+
+                val badgePadX = 14f
+                val badgePadY = 8f
+                val badgeWidth = textBounds.width() + (badgePadX * 2)
+                val badgeHeight = textBounds.height() + (badgePadY * 2)
+                val badgeLeft = left.coerceIn(4f, (width - badgeWidth - 4f).coerceAtLeast(4f))
+                val badgeTop = (top - badgeHeight - 4f).coerceAtLeast(4f)
+
+                drawRoundRect(
+                    color = boxColor,
+                    topLeft = Offset(badgeLeft, badgeTop),
+                    size = Size(badgeWidth, badgeHeight),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(6f, 6f)
+                )
+
+                drawContext.canvas.nativeCanvas.drawText(
+                    labelText,
+                    badgeLeft + badgePadX,
+                    badgeTop + badgePadY + textBounds.height(),
+                    textPaint
                 )
             }
         }
@@ -376,7 +454,14 @@ private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
             val out = ByteArrayOutputStream()
             yuvImage.compressToJpeg(Rect(0, 0, imageProxy.width, imageProxy.height), 80, out)
             val imageBytes = out.toByteArray()
-            android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+            val decoded = android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+            val rotation = imageProxy.imageInfo.rotationDegrees
+            if (decoded != null && rotation != 0) {
+                val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+                Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+            } else {
+                decoded
+            }
         } catch (e2: Exception) {
             null
         }
